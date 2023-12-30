@@ -2,6 +2,7 @@
 resolver = "2"
 
 members = [
+    "hello_pico_ram",
     "hello_pico",
     "hello_pico_multicore",
     "pico_rtic_timer",
