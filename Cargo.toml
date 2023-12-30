@@ -6,5 +6,6 @@ members = [
     "hello_pico",
     "hello_pico_multicore",
     "pico_rtic_timer",
+    "pico_rtic_timer_ram",
     "pico_simple_timer",
 ]
