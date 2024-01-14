@@ -265,6 +265,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hello_pico_probe"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "embedded-hal",
+ "panic-halt",
+ "rp-pico",
+ "rp2040-boot2",
+ "rp2040-hal",
+]
+
+[[package]]
 name = "hello_pico_ram"
 version = "0.1.0"
 dependencies = [
