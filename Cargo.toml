@@ -8,5 +8,5 @@ members = [
     "pico_rtic_timer",
     "pico_rtic_timer_ram",
     "pico_simple_timer",
-    "rtic_demos",
+    "cross_core_demos",
 ]

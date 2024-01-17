@@ -1,4 +1,4 @@
-// DEMO3: cross-pending Interrupt using FIFO
+// DEMO4:  Ping pong example using cross-pending Interrupts
 
 #![no_std]
 #![no_main]
@@ -22,10 +22,10 @@ use hal::pac;
 // Some traits we need
 use embedded_hal::digital::v2::OutputPin;
 
+use cross_core_demos::CoreBridge;
 use hal::clocks::Clock;
 use hal::multicore::{Multicore, Stack};
 use hal::pac::interrupt;
-use rtic_demos::CoreBridge;
 
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 
@@ -37,6 +37,10 @@ pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 
 /// External high-speed crystal on the Raspberry Pi Pico board is 12 MHz.
 const XTAL_FREQ_HZ: u32 = 12_000_000u32;
+
+// simplest buffer possible
+static mut TASK0_SIMPLE_BUFF: u32 = 2;
+static mut TASK1_SIMPLE_BUFF: u32 = 0;
 
 #[rp2040_hal::entry]
 fn main() -> ! {
@@ -127,13 +131,30 @@ fn main() -> ! {
 
 #[interrupt]
 fn TIMER_IRQ_0() {
-    info!("TIMER_IRQ_0 irq executing on core {}", core_id());
+    let ping = unsafe { core::ptr::read_volatile(&TASK1_SIMPLE_BUFF) };
+
+    let pong = ping + 2;
+    info!("TIMER_IRQ_0: Got Ping {}, Sending Pong {} ", ping, pong);
+    asm::delay(1_200_000); //simulate some operation
+
+    // write to buffer and signal to TIMER1 task in core1
+    unsafe { core::ptr::write_volatile(&mut TASK0_SIMPLE_BUFF, pong) };
+    CoreBridge::send_signal(pac::Interrupt::TIMER_IRQ_1);
 }
 
 #[interrupt]
 fn TIMER_IRQ_1() {
-    info!("TIMER_IRQ_1 irq executing on core {}", core_id());
-    // trigger TIMER0 interrupt which is unmasked in core 0
+    let pong = unsafe { core::ptr::read_volatile(&TASK0_SIMPLE_BUFF) };
+
+    // assertion to verify no race condition happend
+    core::assert_eq!(pong, unsafe { TASK1_SIMPLE_BUFF + 2 });
+
+    let ping = pong + 1;
+    info!("TIMER_IRQ_1: Got Pong {}, Sending Ping {}", pong, ping);
+    asm::delay(1_200_000); //simulate some operation
+
+    // write to buffer and signal to TIMER0 task in core0
+    unsafe { core::ptr::write_volatile(&mut TASK1_SIMPLE_BUFF, ping) };
     CoreBridge::send_signal(pac::Interrupt::TIMER_IRQ_0);
 }
 
@@ -150,14 +171,7 @@ fn SIO_IRQ_PROC0() {
 #[interrupt]
 fn SIO_IRQ_PROC1() {
     if let Some(signal) = CoreBridge::read_signal() {
-        info!("SIO_IRQ_PROC1: forwarding irq {:?}", signal as u16);
+        info!("SIO_IRQ_PROC1: forwarding irq {}", signal as u16);
         pac::NVIC::pend(signal);
     }
-}
-
-//================================== Helper functions ====================================
-
-#[inline(always)]
-fn core_id() -> u32 {
-    unsafe { pac::Peripherals::steal().SIO.cpuid.read().bits() }
 }
