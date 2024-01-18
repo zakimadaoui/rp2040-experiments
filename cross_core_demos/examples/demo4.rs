@@ -46,7 +46,7 @@ static mut TASK1_SIMPLE_BUFF: u32 = 0;
 fn main() -> ! {
     // Grab our singleton objects
     let mut pac = pac::Peripherals::take().unwrap();
-    let core = pac::CorePeripherals::take().unwrap();
+    let mut core = pac::CorePeripherals::take().unwrap();
 
     // Set up the watchdog driver - needed by the clock setup code
     let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
@@ -75,6 +75,7 @@ fn main() -> ! {
     let _ = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || {
         info!("core 1 running...");
         let pac = unsafe { pac::Peripherals::steal() };
+        let mut core = unsafe { pac::CorePeripherals::steal() };
 
         // drain too ?
         // while pac.SIO.fifo_st.read().vld().bit() {
@@ -84,8 +85,10 @@ fn main() -> ! {
         pac.SIO.fifo_st.write(|wr| unsafe { wr.bits(0xff) });
         pac::NVIC::unpend(pac::Interrupt::SIO_IRQ_PROC1);
 
-        // unmask FIFO and TIMER1 interrupts
         unsafe {
+            // Set FIFO0 interrupts priority to MAX priority
+            core.NVIC.set_priority(pac::Interrupt::SIO_IRQ_PROC1, 0);
+            // unmask FIFO and TIMER1 interrupts
             pac::NVIC::unmask(pac::Interrupt::SIO_IRQ_PROC1);
             pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_1);
         }
@@ -98,9 +101,11 @@ fn main() -> ! {
     // in order to pass the stack pointer and vector table
     sio.fifo.drain();
 
-    // unmask SIO_IRQ_PROC0 From Core0 and expect Core1 to pend it
     pac::NVIC::unpend(pac::Interrupt::SIO_IRQ_PROC0);
     unsafe {
+        // Set FIFO0 interrupts priority to MAX priority
+        core.NVIC.set_priority(pac::Interrupt::SIO_IRQ_PROC0, 0);
+        // unmask SIO_IRQ_PROC0 From Core0 and expect Core1 to pend it
         pac::NVIC::unmask(pac::Interrupt::SIO_IRQ_PROC0);
         pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0);
     }
