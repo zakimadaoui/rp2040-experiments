@@ -22,10 +22,10 @@ use hal::pac;
 // Some traits we need
 use embedded_hal::digital::v2::OutputPin;
 
+use cross_core_demos::CrossCore;
 use hal::clocks::Clock;
 use hal::multicore::{Multicore, Stack};
 use hal::pac::interrupt;
-use cross_core_demos::CoreBridge;
 
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 
@@ -102,7 +102,7 @@ fn main() -> ! {
     }
 
     // trigger TIMER1 interrupt which is unmasked in core 1
-    CoreBridge::send_signal(pac::Interrupt::TIMER_IRQ_1);
+    CrossCore::pend_irq(pac::Interrupt::TIMER_IRQ_1, 1);
 
     // Configure GPIO25 as an output
     // we need to toggle this led as a sign of life :P !
@@ -134,14 +134,14 @@ fn TIMER_IRQ_0() {
 fn TIMER_IRQ_1() {
     info!("TIMER_IRQ_1 irq executing on core {}", core_id());
     // trigger TIMER0 interrupt which is unmasked in core 0
-    CoreBridge::send_signal(pac::Interrupt::TIMER_IRQ_0);
+    CrossCore::pend_irq(pac::Interrupt::TIMER_IRQ_0, 0);
 }
 
 //================================== FIFO irqs acting as proxy ====================================
 
 #[interrupt]
 fn SIO_IRQ_PROC0() {
-    if let Some(signal) = CoreBridge::read_signal() {
+    if let Some(signal) = CrossCore::get_pended_irq() {
         info!("SIO_IRQ_PROC0: forwarding irq {}", signal as u16);
         pac::NVIC::pend(signal);
     }
@@ -149,7 +149,7 @@ fn SIO_IRQ_PROC0() {
 
 #[interrupt]
 fn SIO_IRQ_PROC1() {
-    if let Some(signal) = CoreBridge::read_signal() {
+    if let Some(signal) = CrossCore::get_pended_irq() {
         info!("SIO_IRQ_PROC1: forwarding irq {:?}", signal as u16);
         pac::NVIC::pend(signal);
     }

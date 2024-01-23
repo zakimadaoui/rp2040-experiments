@@ -22,7 +22,7 @@ use hal::pac;
 // Some traits we need
 use embedded_hal::digital::v2::OutputPin;
 
-use cross_core_demos::CoreBridge;
+use cross_core_demos::{CrossCore, MessageQueue};
 use hal::clocks::Clock;
 use hal::multicore::{Multicore, Stack};
 use hal::pac::interrupt;
@@ -37,10 +37,6 @@ pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 
 /// External high-speed crystal on the Raspberry Pi Pico board is 12 MHz.
 const XTAL_FREQ_HZ: u32 = 12_000_000u32;
-
-// simplest buffer possible
-static mut TASK0_SIMPLE_BUFF: u32 = 2;
-static mut TASK1_SIMPLE_BUFF: u32 = 0;
 
 #[rp2040_hal::entry]
 fn main() -> ! {
@@ -67,6 +63,12 @@ fn main() -> ! {
     let sys_freq = clocks.system_clock.freq().to_Hz();
     let mut delay = cortex_m::delay::Delay::new(core.SYST, sys_freq);
 
+    // make sure the task buffers are initialized (auto generated)
+    unsafe {
+        (*spawn::TASK0_QUEUE.as_mut_ptr()) = Default::default();
+        (*spawn::TASK1_QUEUE.as_mut_ptr()) = Default::default();
+    }
+
     // The single-cycle I/O block controls our GPIO pins
     let mut sio = hal::Sio::new(pac.SIO);
     let mut mc = Multicore::new(&mut pac.PSM, &mut pac.PPB, &mut sio.fifo);
@@ -88,9 +90,9 @@ fn main() -> ! {
         unsafe {
             // Set FIFO0 interrupts priority to MAX priority
             core.NVIC.set_priority(pac::Interrupt::SIO_IRQ_PROC1, 0);
-            // unmask FIFO and TIMER1 interrupts
+            // unmask FIFO and TIMER0 interrupts
             pac::NVIC::unmask(pac::Interrupt::SIO_IRQ_PROC1);
-            pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_1);
+            pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0);
         }
         loop {
             asm::nop()
@@ -102,6 +104,7 @@ fn main() -> ! {
     sio.fifo.drain();
 
     pac::NVIC::unpend(pac::Interrupt::SIO_IRQ_PROC0);
+    pac::NVIC::unpend(pac::Interrupt::TIMER_IRQ_0);
     unsafe {
         // Set FIFO0 interrupts priority to MAX priority
         core.NVIC.set_priority(pac::Interrupt::SIO_IRQ_PROC0, 0);
@@ -110,8 +113,8 @@ fn main() -> ! {
         pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0);
     }
 
-    // trigger TIMER1 interrupt which is unmasked in core 1
-    CoreBridge::send_signal(pac::Interrupt::TIMER_IRQ_1);
+    // start the ping pong...
+    spawn::core1_task(3);
 
     // Configure GPIO25 as an output
     // we need to toggle this led as a sign of life :P !
@@ -134,49 +137,76 @@ fn main() -> ! {
 
 // ============================================ Tasks =============================================
 
-#[interrupt]
-fn TIMER_IRQ_0() {
-    let ping = unsafe { core::ptr::read_volatile(&TASK1_SIMPLE_BUFF) };
+fn core0_task(ping: u32, cpuid: u32) {
+    core::assert_eq!(cpuid, 0);
 
-    let pong = ping + 2;
-    info!("TIMER_IRQ_0: Got Ping {}, Sending Pong {} ", ping, pong);
-    asm::delay(1_200_000); //simulate some operation
-
-    // write to buffer and signal to TIMER1 task in core1
-    unsafe { core::ptr::write_volatile(&mut TASK0_SIMPLE_BUFF, pong) };
-    CoreBridge::send_signal(pac::Interrupt::TIMER_IRQ_1);
+    let pong = ping + 1;
+    info!("core0_task: Got Ping {}, Sending Pong {} ", ping, pong);
+    asm::delay(12_000_000); //simulate some operation
+                            // spawn core1_task on core 1 and pass the `pong` message to it
+    spawn::core1_task(pong);
 }
 
-#[interrupt]
-fn TIMER_IRQ_1() {
-    let pong = unsafe { core::ptr::read_volatile(&TASK0_SIMPLE_BUFF) };
-
-    // assertion to verify no race condition happend
-    core::assert_eq!(pong, unsafe { TASK1_SIMPLE_BUFF + 2 });
+fn core1_task(pong: u32, cpuid: u32) {
+    core::assert_eq!(cpuid, 1);
 
     let ping = pong + 1;
-    info!("TIMER_IRQ_1: Got Pong {}, Sending Ping {}", pong, ping);
-    asm::delay(1_200_000); //simulate some operation
+    info!("core1_task: Got Pong {}, Sending Ping {}", pong, ping);
+    asm::delay(12_000_000); //simulate some operation
+                            // spawn core1_task on core 1 and pass the `pong` message to it
+    spawn::core0_task(ping);
+}
 
-    // write to buffer and signal to TIMER0 task in core0
-    unsafe { core::ptr::write_volatile(&mut TASK1_SIMPLE_BUFF, ping) };
-    CoreBridge::send_signal(pac::Interrupt::TIMER_IRQ_0);
+// ======================================== Spawn API (auto generated) =======================================
+mod spawn {
+
+    use super::*;
+    use core::mem::MaybeUninit;
+
+    pub static mut TASK0_QUEUE: MaybeUninit<MessageQueue<u32, 3>> = MaybeUninit::uninit();
+    pub static mut TASK1_QUEUE: MaybeUninit<MessageQueue<u32, 3>> = MaybeUninit::uninit();
+
+    pub fn core0_task(ping: u32) {
+        unsafe { TASK0_QUEUE.assume_init_mut().push(ping).unwrap() };
+        CrossCore::pend_irq(pac::Interrupt::TIMER_IRQ_0, 1);
+    }
+
+    pub fn core1_task(pong: u32) {
+        unsafe { TASK1_QUEUE.assume_init_mut().push(pong).unwrap() };
+        CrossCore::pend_irq(pac::Interrupt::TIMER_IRQ_0, 0);
+    }
+}
+// ========================================== Dispatchers (auto generated) =========================================
+#[interrupt]
+fn TIMER_IRQ_0() {
+    let cpuid = unsafe { pac::Peripherals::steal().SIO.cpuid.read().bits() };
+    if cpuid == 0 {
+        // while is used as Core1 can produce signals much faster than Core0 can consume
+        while let Some(data) = unsafe { spawn::TASK0_QUEUE.assume_init_mut().pop() } {
+            core0_task(data, 0);
+        }
+    } else {
+        // while is used as Core0 can produce signals much faster than Core1 can consume
+        while let Some(data) = unsafe { spawn::TASK1_QUEUE.assume_init_mut().pop() } {
+            core1_task(data, 1)
+        }
+    }
 }
 
 //================================== FIFO irqs acting as proxy ====================================
 
 #[interrupt]
 fn SIO_IRQ_PROC0() {
-    if let Some(signal) = CoreBridge::read_signal() {
-        info!("SIO_IRQ_PROC0: forwarding irq {}", signal as u16);
+    if let Some(signal) = CrossCore::get_pended_irq() {
+        // info!("SIO_IRQ_PROC0: forwarding irq {}", signal as u16);
         pac::NVIC::pend(signal);
     }
 }
 
 #[interrupt]
 fn SIO_IRQ_PROC1() {
-    if let Some(signal) = CoreBridge::read_signal() {
-        info!("SIO_IRQ_PROC1: forwarding irq {}", signal as u16);
+    if let Some(signal) = CrossCore::get_pended_irq() {
+        // info!("SIO_IRQ_PROC1: forwarding irq {}", signal as u16);
         pac::NVIC::pend(signal);
     }
 }
