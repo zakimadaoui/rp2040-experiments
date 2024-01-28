@@ -66,11 +66,10 @@ mod app {
         .ok()
         .unwrap();
 
-
-        // set (ADDR(.vector_table) + 4) in VTOR to point to the RAM vector table offset. 
+        // set (ADDR(.vector_table) + 4) in VTOR to point to the RAM vector table offset.
         // the +4 is because _stack_start location is stored at the beginning of .vector_table section.
         unsafe {
-            cx.core.SCB.vtor.write(0x20000000+4);
+            cx.core.SCB.vtor.write(0x20000000 + 4);
         }
 
         // The single-cycle I/O block controls our GPIO pins

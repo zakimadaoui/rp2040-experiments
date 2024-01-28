@@ -25,8 +25,8 @@ use embedded_hal::blocking::delay::DelayMs;
 use embedded_hal::digital::v2::OutputPin;
 
 /// The linker will place this boot block at the start of our program image. We
-/// need this to help the ROM bootloader get our code up and running. and here we 
-/// specify a second stage bootloader that copies flash contents to ram before starting to run 
+/// need this to help the ROM bootloader get our code up and running. and here we
+/// specify a second stage bootloader that copies flash contents to ram before starting to run
 #[link_section = ".boot2"]
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_RAM_MEMCPY;
