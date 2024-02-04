@@ -1,0 +1,20 @@
+[package]
+name = "bus_behavior"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rp2040-hal = "0.9.1"
+cortex-m = "0.7.7"
+cortex-m-rt = "0.7.3"
+panic-halt = "0.2.0"
+rp2040-boot2 = "0.3.0"
+
+embedded-hal = "0.2.7"
+rp-pico = "0.8.0"
+
+defmt = "0.3"
+defmt-rtt = "0.4"
+panic-probe = { version = "0.3", features = ["print-defmt"] }

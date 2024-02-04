@@ -17,7 +17,7 @@
             "gdbTarget": "localhost:3333",
             // If you have the Pico SDK installed, allows the
             // display of the RP2040 CPU registers in VS Code
-            "svdFile": "${workspaceFolder}/rp2040.svd",
+            "svdFile": "${workspaceFolder}/debug/rp2040.svd",
             "runToMain": true,
             "preLaunchCommands": [
                 "monitor init",
@@ -29,6 +29,42 @@
                 "break main",
                 "continue"
             ],
+            "interface": "swd",
+            "configFiles": [
+                "${workspaceFolder}/debug/cmsis-dap.cfg",
+                "${workspaceFolder}/debug/rp2040.cfg"
+            ],
+            "openOCDLaunchCommands": [
+                "adapter speed 5000"
+            ]
+        },
+        {
+            "name": "Debug bus_behavior/exp2.rs",
+            "request": "launch",
+            "type": "cortex-debug",
+            "cwd": "${workspaceRoot}",
+            "executable": "${workspaceFolder}/target/thumbv6m-none-eabi/debug/examples/exp2",
+            "servertype": "external",
+            "gdbPath": "gdb-multiarch",
+            "gdbTarget": "localhost:3333",
+            "svdFile": "${workspaceFolder}/debug/rp2040.svd",
+            "preLaunchCommands": [
+                "monitor init",
+                "monitor reset init",
+                "monitor halt",
+            ],
+            "postRestartCommands": [
+                "break main",
+                "continue"
+            ],
+            "interface": "swd",
+            "configFiles": [
+                "${workspaceFolder}/debug/cmsis-dap.cfg",
+                "${workspaceFolder}/debug/rp2040.cfg"
+            ],
+            "openOCDLaunchCommands": [
+                "adapter speed 5000"
+            ]
         }
     ]
 }
