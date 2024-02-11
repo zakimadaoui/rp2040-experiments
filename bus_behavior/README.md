@@ -1,17 +1,20 @@
 # Bus behavior characterization
 ### Introduction
 
-In this set of experiments we will try to get Core0 and Core1 of the rp2040 to execute concurrent memory accesses in lockstep and try to determine how the AHB-Lite Crossbar arbiters resolve the concurrent accesses of both cores to the same Memory bank (same bus slave) and try to set an upper bound to the latency resulting from the arbitration.
+In this set of experiments we will try to  orchestrate the two cores of the rp2040 to perform concurrent memory accesses in lockstep and by varying few parameters such as the data location, code location and bus priority, we will determine how the AHB-Lite Crossbar arbiters resolve the concurrent accesses of both cores to the same Memory bank (same bus slave) and try to set an upper bound to the latency resulting from the arbitration.
 
 ### What we already know from the rp2040 datasheet
 
 **Execution time of some assembly instructions**
 
-| Instruction             | Clock Cycles |
-| ----------------------- | ------------ |
-| `nop`                   | 1            |
-| `LDR Rd, [Rn, #<imm>] ` | 2            |
-| `STR Rd, [Rn, #<imm>]`  | 2            |
+| Instruction                                 | Clock Cycles |
+| ------------------------------------------- | ------------ |
+| `nop`                                       | 1            |
+| `LDR Rd, [Rn, #<imm>] ` or `LDR Rd, .label` | 2            |
+| `STR Rd, [Rn, #<imm>]`or `STR Rd, .label`   | 2            |
+| `ADD`                                       | 1            |
+| `SUB`                                       | 1            |
+| `PUSH {rN, lr}`                             | 3            |
 
 **Table1:** execution time of NOP, STR and LDR instruction
 
@@ -24,7 +27,7 @@ In this set of experiments we will try to get Core0 and Core1 of the rp2040 to e
 - Priority arbitration only applies to multiple masters attempting to access the same slave on the same cycle. Accesses to different slaves, e.g. different SRAM banks, can proceed simultaneously.
 - When accessing a slave with zero wait states, such as SRAM (i.e. can be accessed once per system clock cycle), high-priority masters will never observe any slowdown or other timing effects caused by accesses from low-priority masters. This allows guaranteed latency and throughput for hard real time use cases; it does however mean a low-priority master may get stalled until there is a free cycle.
 
-The above bullet points were taken directly from the rp2040 datasheet. From them we can understand that when both cores have the same bus priority and they **simultaneously** execute a load or store instruction to the same memory bank, the arbiter will apply a round robin tie break. And if we assume the round robin tie break goes in this order (core0 then core1) then the execution should go as follows for `LDR R0, [R1] ` (where on both cores R0 points to an address in the same memory bank):
+The above bullet points were taken directly from the rp2040 datasheet. From them we can understand that when both cores have the same bus priority and they **simultaneously** execute a load or store instruction to the same memory bank, the arbiter will apply a round robin tie break. And if we assume the round robin tie break goes in this order (core0 then core1) then the execution should go as follows for `LDR R0, [R1] ` (where on both cores R1 points to an address in the same memory bank):
 
 | Time                 | Core0 executing LDR                                          | Core1 executing LDR                                          |
 | -------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
@@ -100,30 +103,40 @@ The results match with the expected clock cycles count, and therefore we can con
 
 #### Executing an instruction on both cores at the same time
 
-Theoretically, we can get the two cores to execute in lockstep by tying to execute an interrupt on both cores at the same time. It would be even better to be able to trigger different interrupt lines on each core at the same time, and that could be done on the rp2040 as follows:
+We can get the two cores to execute in lockstep by tying to execute an interrupt on both cores at the same time. This could be done on the rp2040 as follows:
 
-- unmask TIMER0 interrupt on core0, and wait for core1 to unmask TIMER1 interrupt from its local NVIC
-- unmask TIMER1 interrupt on core1 and let core 0 this has been done
-- core0 then Sets the bits for Alarm0 and Alarm1 interrupts to 1 in the Interrupt **enable** register INTE of the TIMER peripheral. 
-- core0 then Sets the bits for Alarm0 and Alarm1 interrupts to 1 in the Interrupt **Force** register INTF of the TIMER peripheral. This will trigger an interrupt on both cores, core0 will handle the IRQ for Alarm0 (TIMER_IRQ_0) and core1 will handle the IRQ for Alarm1 (TIMER_IRQ_1).
+- unmask TIMER0 interrupt on core0, and wait for core1 to unmask TIMER0 interrupt from its local NVIC (this can be communicated using the fifo/mailbox )
+- core0 then enables the Alarm0 interrupt by setting the first bit (bit 0)  in the **INTE** register of the TIMER peripheral to1.
+- core0 then Asserts the Alarm0  interrupt by setting the first bit (bit 0)  in the **INTF** register of the TIMER peripheral to 1.
+- this will be enough to trigger the same interrupt on both cores at the same time
 
-
-
-**Note:** Before continuing to read the next paragraphs, I would suggest reading all the next experiments sections first (or at least comeback and read again the next paragraphs after you have completed reading this whole article) as they provide a lot of background that is needed to understand the next paragraphs. 
+However, in order for the above steps to work as intended we have to move the **vector table** and **Interrupt handler of each core** to be on a different SRAM banks. This is in order to avoid having a race condition between the two cores to the same memory bank when trying to fetch the ISR address to execute. The memory partitioning can be done as follows:
 
 
 
-In practice the above steps (bullet points) are not enough to get the two cores to execute in lockstep. The reason is that when the interrupt lines are asserted on both cores, they both try to access the vector table to get the ISR address for that specific interrupt line. And this is the first place where we will have concurrent access of both cores to the same memory bank and the bus arbiter will grant access to one of the cores first, then, gives access to the other core (this will be explained in detail in the later experiments). So, Assuming that the vector table was stored in RAM the first core can fetch the ISR, then the second core will be able to fetch the other ISR one clock cycle after. And because of that the two cores will be out of sync.
+#### Memory partitioning
 
-To fix the earlier issue we can simply add a NOP instruction on one of the ISRs (the ISR which starts executing first) in order to synchronize the execution between the two cores and get them to execute in lockstep. However, if the vector table is stored in FLASH The wait time is significantly longer. I have measured It will be 140 clock cycles to be exact.
+| CPU    | Code                           | location |
+| ------ | ------------------------------ | -------- |
+| Core 0 | Vector table                   | sram2    |
+| Core 0 | TIMER/ALARM0 interrupt handler | sram2    |
+| Core 0 | Main code                      | sram2    |
+|        |                                |          |
+| Core 1 | Vector table                   | sram3    |
+| Core 1 | TIMER/ALARM0 interrupt handler | sram3    |
+| Core 1 | Main code                      | sram3    |
+|        |                                |          |
+|        | Shared data                    | sram4    |
 
-the linker script that comes with the RP2040 HAL puts the vector table in FLASH and the default bootloader does't offer copying the vector table to RAM so this has to be manually done. In order to avoid this hassle i will be adding 140 NOP instructions in one of the ISRs in all of the experiments in order to synchronize the two Cores to execute in lockstep. In the future i might modify the linkerscript and manually copy the vector table to RAM. Till then, don't be surprised to see 140 NOP instructions in the ISRs in examples codes.
+ 
+
+
 
 ----
 
 ### Experiments
 
-In the next experiments we try to get the two cores (Core0 and Core1) to execute some memory access instructions in lockstep and play on the following parameters to understand how the bust arbitration works. The variable parameters are:
+In the next experiments we try to get the two cores (Core0 and Core1) to execute some memory access instructions in lockstep and play on some parameters to understand how the bust arbitration works. The variable parameters are:
 
 - Bus priority
 - Data location
@@ -138,13 +151,10 @@ Systick timer will be used to measure how long the simulanious accesses take, in
 Execute a memory read instruction to the same memory location/bank on **both cores at the same time**
 
 - both cores have the same priority (priorities 0 and 1 gave the same results)
-- core0 executes TIMER0 ISR which is located in **SRAM2**
-- core1 executes TIMER1 ISR which is located in **SRAM3**
-- shared data in **SRAM4** (at **0x20040000**) is accessed from both ISRs at the same time
-- Bus performance counters, from BUSCTRL peripheral, are used to count events of **contested APB accesses** on sram4  
+- the interrupt handler on core0  is located in **SRAM2**, and the interrupt handler on core1  is located in **SRAM3** (see memory partitioning section above)
+- shared data in **SRAM4** (at **0x20040000**) and the two cores attempt to access it from at the same time
+- Bus performance counters, from BUSCTRL peripheral, are configured to count events of **contested APB accesses** on **SRAM4**  
 - Systick timer on each core is used to measure clock cycles of concurrent read instructions
-
-
 
 **Expectations**
 
@@ -174,7 +184,7 @@ The result came out similarly to what was expected, core1 executed the LDR instr
 
 ----
 
-### Experiment 1.1 (examples/exp1_1.rs)
+#### Experiment 1.1 (examples/exp1_1.rs)
 
 Same as experiment 1, with the following differences:
 
@@ -201,7 +211,7 @@ The results were the same as expected
 
 ----
 
-### Experiment 2 (examples/exp2.rs)
+#### Experiment 2 (examples/exp2.rs)
 
 Same as experiment 1, with the following differences:
 
@@ -217,7 +227,7 @@ Also the same as experiment 1
 
 ----
 
-### Experiment 3 (examples/exp3.rs)
+#### Experiment 3 (examples/exp3.rs)
 
 Same as experiment 1, with the following differences:
 
@@ -244,7 +254,7 @@ The results meet the expectation
 
 ----
 
-### Experiment 4 (examples/exp4.rs)
+#### Experiment 4 (examples/exp4.rs)
 
 Same as experiment 1, with the following differences:
 
@@ -274,7 +284,7 @@ One thing that is worth noting in this experiment, it that we can always predict
 
 ----
 
-### Experiment 5 (examples/exp5.rs)
+#### Experiment 5 (examples/exp5.rs)
 
 Same as experiment 1, with the following differences:
 
@@ -311,12 +321,12 @@ Notice that at **t=2** Core1 has already finished executing the first LDR instru
 
 ----
 
-### Experiment 6 (examples/exp6.rs)
+#### Experiment 6 (examples/exp6.rs)
 
 Same as experiment 1, with the following differences:
 
 - 100 read instructions instead of one read instruction
-- core1 has higher bus priority than core0
+- core0 has higher bus priority than core1
 
 **Expectations**
 
@@ -330,20 +340,20 @@ cargo run --example exp2
 ```
 
 ```
-concurrent read on core 0 took 201 clock cycles. read val is 77
-concurrent read on core 1 took 200 clock cycles. read val is 77
-contested RAM accesses [sram4 = 1]
+concurrent read on core 0 took 200 clock cycles. read val is 77
+concurrent read on core 1 took 201 clock cycles. read val is 77
+contested RAM accesses [ram4 = 1]
 ```
 
 The results were the same as expected
 
 ----
 
-### Experiment 7 (examples/exp7.rs + examples/exp7_1.rs)
+#### Experiment 7 (examples/exp7.rs + examples/exp7_1.rs)
 
 Same as experiment 1, with the following differences:
 
-- TIMER0 and TIMER1 ISR in same memory location (SRAM bank2). where core0 executes TIMER0 isr and core1 executes TIMER1 ISR, but the two cores try to access **the same** memory bank (sram4)
+- the ISR executing on core0 and the ISR executing on core1 are stored in the same memory location (**SRAM2**). 
 
 **Obtained results**
 
@@ -360,17 +370,138 @@ contested RAM accesses [sram4 = 0]
 
 **Explanation**
 
-its hard to predict what would happen, But a logical explanation can be as follows.
+When both NVICs on the two cores detect that the ALARM0 interrupt signal is asserted, the two processors fetch the address of the ISR from their corresponding vector tables. However, since both ISRs are located in the same memory bank (**SRAM2**), when both cores try to jump to the first instruction, the arbitration unit sees that both cores are trying to simultaneously access the same memory bank. So, one core succeeds to branch to the interrupt handler while the other one stalls for one more clock cycle due to arbitration unit round robin tie break. Therefore, the two cores will no longer be in sync and there will be no contested accesses to SRAM4 as the two cores will not be executing instructions in lockstep but there's always one core that is one clock cycle ahead from the other core (This will be analogous to what happened in **Example 5**) . And from previous experiments we know that core1 will be the core that will be granted access first and hence it will be the one that is 1 clock cycle ahead of core0.
 
-The cortex-m0+ has a two stage instruction pipeline, when both cores try to concurrently fetch an instruction from the same RAM bank, one of them is granted access while the other **stalls**  (analogous to what happened in experiment 5) so the **instruction fetch** stages on the two cores will not be in sync and therefore there will be no contested accesses to SRAM4 as the two cores will not be executing instructions in lockstep but there's always one core that is one clock cycle ahead from the other core. And from previous experiments we know that core1 will be the core that will be granted access first and hence it will be the one that is 1 clock cycle ahead of core0 
-
-In fact we can test whether this hypothesis is correct by adding a NOP instruction in TIMER1 ISR (to be executed by core1). The NOP instruction takes 1 clock cycle to execute and this should be enough to put back core1 one clock cycle behind and hence it will be back in sync with core0. This has been tried in `examples/exp7_1.rs`, and the output is as hyphothesised, we get a concurrent access !
+In fact we can test whether this hypothesis is correct by adding a NOP instruction in core1 ISR. The NOP instruction takes 1 clock cycle to execute and this should be enough to put back core1 one clock cycle behind and hence it will be back in sync with core0. This has been tried in `examples/exp7_1.rs`, and the output is as hypothesized, we get a concurrent access !
 
 ```
 concurrent read on core 0 took 3 clock cycles. read val is 77
 concurrent read on core 1 took 2 clock cycles. read val is 77
 contested RAM accesses [sram4 = 1]
 ```
+
+----
+
+#### Experiment 8: Measuring the rp2040 interrupt latency (examples/interrupt_latency.rs)
+
+We can measure the interrupt latency on the rp2040 as follows:
+
+On the Main code:
+
+1. First we unmask TIMER_IRQ_0 on Core0
+2. Enable the ALARM0 interrupt from **INTE** register.
+3. Read the Systick timer value. lets call this `MEASUREMENT_START_TIME`
+4. Then **immediately** force trigger the ALARM0 interrupt (using **INTF** register), 
+5. then **immediately** read the Systick timer again. Let's call this `INTF_ASSERTION_TIME`. (this is guaranteed to be called before the processor jumps to the ISR because the interrupt latency is always above 10 clock cycles on all cortex-m processors)
+
+the code that does steps 3-5 looks a follows:
+
+```rust
+let MEASUREMENT_START_TIME: u32;
+let INTF_ASSERTION_TIME: u32;
+unsafe {
+    core::arch::asm!(
+        "ldr {0}, [{1}]", // read systic right before asserting the interrupt line
+        "str {2}, [{3}]", // force trigger ALARM0 interrupt
+        "ldr {4}, [{1}]", // read systic right after asserting the interrupt line
+        out(reg) MEASUREMENT_START_TIME, // {0} register to hold MEASUREMENT_START_TIME value
+        in(reg) SYST_CVR, // {1} // pointer to Systic CVR register
+        in(reg) 0x0000_0001, // {2} value to enable the alarm0 interrupt line (first bit in the register)
+        in(reg) TIMER_INTF, // {3} pointer to INTF register
+        out(reg) INTF_ASSERTION_TIME, // {4} register to hold INTF_ASSERTION_TIME value
+
+    );
+}
+```
+
+
+
+On the Interrupt Handler:
+
+1. the first thing to do is to read the Systick timer value. let's call this value `TIMER_IRQ_ACK_TIME`.
+
+the code for this step looks as follows:
+
+```rust
+#[link_section = ".sram2_code"]
+static mut TIMER_IRQ_ACK_TIME: u32 = 0;
+
+#[link_section = ".sram2_code"]
+pub extern "C" fn core0_timer_irq() {
+    unsafe {
+        const SYST_CVR: *const u32 = 0xE000_E018 as *const u32;
+        let ack_time: u32;
+        core::arch::asm!(
+            "ldr {0}, [{1}]", // read systick current value register CVR
+            out(reg) ack_time,
+            in(reg) SYST_CVR,
+        );
+
+        core::ptr::write_volatile(&mut TIMER_IRQ_ACK_TIME, ack_time);
+        // stop this triggering interrupt
+        pac::Peripherals::steal().TIMER.intf.reset();
+    }
+}
+```
+
+
+
+With this we can define the total interrupt latency measurement time as: 
+
+```rust
+let TOTAL_MEASURMENT_TIME = MEASUREMENT_START_TIME - TIMER_IRQ_ACK_TIME;
+```
+
+But unfortunately, even though the measurements code was written in assembly to minimize any overhead that comes from the language abstractions, the total measured clock cycles still include a lot of overhead introduced from different sources. Let's try to identify all of those sources and eliminate them.
+
+1. `SYSTICK_MEASURMENT_DELAY`: We have already discussed in the section: [Measuring clock cycles accurately](#Measuring clock cycles accurately) how we could use the Systick timer to measure the clock cycles taken by some operation, and mentioned the 2 clock cycles overhead due to reading **CVR** of the Sytick twice. Let's call that overhead  `SYSTICK_MEASURMENT_DELAY`=2.
+
+2. `INTF_ASSERTION_DELAY`: The time needed for the STR instruction to be executed in order to assert the ALARM0 interrupt line high can calculated as follows:   
+
+   ```rust
+   let INTF_ASSERTION_DELAY = MEASUREMENT_START_TIME - INTF_INTF_ASSERTION_TIME - 2; // see first code snippet
+   ```
+
+3. `IRQ_HANDLER_DELAY`: The interrupt handler generated code includes a couple of **necessary** assembly instructions that are executed before we could read the value of the Systick's CVR register. The assembly instructions look as follows (from disassembled code) 
+
+   ```assembly
+   // part of the disassembed code for second snippet above
+   core0_timer_irq: 
+   	push {r7, lr}		// 3 clock cycles
+   	add	 r7, sp, #0		// 1 clock cycles
+   	sub	 sp, #32		// 1 clock cycles
+   	ldr	 r1, .CVR_PTR	// 2 clock cycles
+   	ldr	 r0, [r1] 		// instruction where we are actually able to read the Systick's CVR register
+   ```
+
+   From the above disassembly, we can define `IRQ_HANDLER_DELAY `= 7
+
+
+
+By subtracting the 3 delays mentioned above we can get the rp2040 interrupt latency:
+
+```rust
+let interrupt_latency = TOTAL_MEASURMENT_TIME - INTF_ASSERTION_DELAY - IRQ_HANDLER_DELAY - SYSTICK_MEASURMENT_DELAY;
+```
+
+
+
+The above procedure has been performed in `examples/interrupt_latency.rs` and the result is as follows:
+
+```bash
+cargo run --example interrupt_latency
+
+Total measurement time           = 30 clock cycles
+systick measurment delay         = 02 clock cycles
+irq handler delay                = 07 clock cycles
+Alarm0 interrupt assertion delay = 05 clock cycles
+total measurment delay           = 14 clock cycles
+irq latency on core0             = 16 clock cycles
+```
+
+
+
+**Note**: This experiment was be performed only on Core0 while core1 will be disabled to avoid any interference.
 
 ----
 

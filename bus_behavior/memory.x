@@ -40,6 +40,12 @@ SECTIONS {
 
 SECTIONS {
     
+    .ram_code ORIGIN(RAM) :
+    {
+        *(.ram_code .ram_code.*);
+    } > RAM
+ 
+
     .sram2_code ORIGIN(SRAM2) :
     {
         *(.sram2_code .sram2_code.*);

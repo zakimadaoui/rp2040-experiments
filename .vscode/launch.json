@@ -39,11 +39,11 @@
             ]
         },
         {
-            "name": "Debug bus_behavior/exp2.rs",
+            "name": "Debug bus_behavior/exp1.rs",
             "request": "launch",
             "type": "cortex-debug",
             "cwd": "${workspaceRoot}",
-            "executable": "${workspaceFolder}/target/thumbv6m-none-eabi/debug/examples/exp2",
+            "executable": "${workspaceFolder}/target/thumbv6m-none-eabi/debug/examples/exp1",
             "servertype": "external",
             "gdbPath": "gdb-multiarch",
             "gdbTarget": "localhost:3333",

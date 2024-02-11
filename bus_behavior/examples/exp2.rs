@@ -21,7 +21,8 @@ use rp2040_hal as hal;
 // register access
 use hal::{
     multicore::{Multicore, Stack},
-    pac::{self, interrupt},
+    pac,
+    vector_table::VectorTable,
     Sio,
 };
 
@@ -30,10 +31,23 @@ use hal::{
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 /// External high-speed crystal on the Raspberry Pi Pico board is 12 MHz.
 const XTAL_FREQ_HZ: u32 = 12_000_000u32;
-static mut CORE1_STACK: Stack<4096> = Stack::new();
+
+// this will set SP for core1 to be at the end of SRAM5.
+// SP for core0 and core1 must be at different banks otherwise they will contest on the same memory bank when they try to push to stack
+#[link_section = ".sram5_code"]
+static mut CORE1_STACK: Stack<1024> = Stack::new();
+
 const CORE1_READY: u32 = 7;
 
+// vector tables for the two cores stored in different memeory regions to avoid any concurrent
+// access to the same memory bank when the two cores both receive an interrupt at the same time
+#[link_section = ".sram2_code"]
+static mut CORE0_VECTOR_TABLE: VectorTable = VectorTable::new();
+#[link_section = ".sram3_code"]
+static mut CORE1_VECTOR_TABLE: VectorTable = VectorTable::new();
+
 #[rp2040_hal::entry]
+#[link_section = ".sram2_code"]
 fn main1() -> ! {
     // Grab our singleton objects
     let mut pac = pac::Peripherals::take().unwrap();
@@ -42,13 +56,20 @@ fn main1() -> ! {
     // configure systic to prepare for measurements
     systic_init();
 
+    // configure a vector table in RAM
+    unsafe {
+        // let mut CORE0_VECTOR_TABLE: VectorTable = VectorTable::new();
+        CORE0_VECTOR_TABLE.init(&mut pac.PPB);
+        CORE0_VECTOR_TABLE.register_handler(pac::Interrupt::TIMER_IRQ_0 as usize, core0_timer_irq);
+        CORE0_VECTOR_TABLE.activate(&mut pac.PPB);
+    }
+
     // configure bus priorities for both cores to be MAX
     pac.RESETS.reset.modify(|_, w| w.busctrl().clear_bit()); // take BUSCTRL out of reset mode
     pac.BUSCTRL.bus_priority.write(|w| {
         w.proc0().clear_bit();
         w.proc1().set_bit()
     });
-    pac.BUSCTRL.perfctr0.reset(); // reset counter
 
     // Set up the watchdog driver - needed by the clock setup code
     let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
@@ -75,16 +96,13 @@ fn main1() -> ! {
 
     // unpend and unmask timer interrupts
     pac::NVIC::unpend(pac::Interrupt::TIMER_IRQ_0);
-    unsafe {
-        pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0);
-    }
+    unsafe { pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0) };
 
     // wait for Core 1
     while sio.fifo.read_blocking() != CORE1_READY {}
 
     // configure performance counters to measure contested reads on sram5
     pac.BUSCTRL.perfsel0.reset();
-
     pac.BUSCTRL
         .perfsel0
         .write(|w| w.perfsel0().sram4_contested()); // select counter 0 measurement
@@ -94,18 +112,14 @@ fn main1() -> ! {
     let ptr_sram4 = 0x20040000 as *mut u32;
     unsafe { ptr_sram4.write_volatile(77) };
 
-    // force trigger separate interupt lines both cores (TIMER0 on CORE0 and TIMER1 on CORE1)
-    pac.TIMER
-        .inte
-        .write(|wr| wr.alarm_0().set_bit().alarm_1().set_bit());
-    pac.TIMER
-        .intf
-        .write(|wr| wr.alarm_0().set_bit().alarm_1().set_bit());
+    // force trigger timer (ALARM0) interupt
+    pac.TIMER.inte.write(|wr| wr.alarm_0().set_bit());
+    pac.TIMER.intf.write(|wr| wr.alarm_0().set_bit());
     // wait a bit to make sure the timer interrupts execute
     asm::delay(12_500_000u32);
     // read performace counter for contested reads on srams
     println!(
-        "contested RAM accesses [sram4 = {}]",
+        "contested RAM accesses [ram4 = {}]",
         pac.BUSCTRL.perfctr0.read().bits(),
     );
     pac.BUSCTRL.perfctr0.reset(); // reset counter
@@ -125,18 +139,29 @@ fn main1() -> ! {
     }
 }
 
+#[link_section = ".sram3_code"]
 fn main2() -> ! {
-    let pac = unsafe { pac::Peripherals::steal() };
+    let mut pac = unsafe { pac::Peripherals::steal() };
     let mut sio = Sio::new(pac.SIO);
 
     // configure systic to prepare for measurements
     systic_init();
 
-    // unpend and unmask timer interrupts
-    pac::NVIC::unpend(pac::Interrupt::TIMER_IRQ_1);
+    // configure a vector table in RAM
     unsafe {
-        pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_1);
+        // let mut CORE1_VECTOR_TABLE: VectorTable = VectorTable::new();
+        CORE1_VECTOR_TABLE.init(&mut pac.PPB);
+        // set SP for core1 to be at the end of SRAM5.
+        // SP for core0 and core1 must be at different banks otherwise they will contest on the same memory bank when they try to push to stack
+        // CORE1_VECTOR_TABLE.set_sp(0x20042000);
+        CORE1_VECTOR_TABLE.register_handler(pac::Interrupt::TIMER_IRQ_0 as usize, core1_timer_irq);
+        CORE1_VECTOR_TABLE.activate(&mut pac.PPB);
     }
+
+    // unpend and unmask timer interrupts
+    pac::NVIC::unpend(pac::Interrupt::TIMER_IRQ_0);
+    unsafe { pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0) };
+
     // inform Core 0 that timers interrupts are unmasked
     sio.fifo.write_blocking(CORE1_READY);
 
@@ -145,79 +170,67 @@ fn main2() -> ! {
     }
 }
 
-#[interrupt]
 #[link_section = ".sram2_code"]
-unsafe fn TIMER_IRQ_0() {
-    let mut read_value: u32;
-    let a = {
-        const SYST_CVR: *const u32 = 0xE000_E018 as *const u32;
-        let ptr_sram4 = 0x20040000 as *mut u32;
-        let start: u32;
-        let end: u32;
-        core::arch::asm!(
-            "ldr {0}, [{3}]", // read systick current value register CVR
-            "ldr {1}, [{4}]", // read from sram4
-            "ldr {2}, [{3}]", // read systick current value register CVR
-            out(reg) start,
-            out(reg) read_value,
-            out(reg) end,
-            in(reg) SYST_CVR,
-            in(reg) ptr_sram4,
+#[no_mangle]
+pub extern "C" fn core0_timer_irq() {
+    unsafe {
+        let mut read_value: u32;
+        let a = {
+            const SYST_CVR: *const u32 = 0xE000_E018 as *const u32;
+            let ptr_sram4 = 0x20040000 as *mut u32;
+            let start: u32;
+            let end: u32;
+            core::arch::asm!(
+                "ldr {0}, [{3}]", // read systick current value register CVR
+                "ldr {1}, [{4}]", // read from sram4
+                "ldr {2}, [{3}]", // read systick current value register CVR
+                out(reg) start,
+                out(reg) read_value,
+                out(reg) end,
+                in(reg) SYST_CVR,
+                in(reg) ptr_sram4,
+            );
+            start - end - 2
+        };
+
+        println!(
+            "concurrent read on core 0 took {} clock cycles. read val is {}",
+            a, read_value
         );
-
-        start - end - 2
-    };
-
-    println!(
-        "concurrent read on core 0 took {} clock cycles. read val is {}",
-        a, read_value
-    );
-    // stop this triggering interrupt
-    unsafe { (0x4005403c as *mut u32).write(0) }; /* TIMER->INTF = 0*/
+        // stop this triggering interrupt
+        pac::Peripherals::steal().TIMER.intf.reset();
+    }
 }
 
-#[interrupt]
 #[link_section = ".sram3_code"]
-unsafe fn TIMER_IRQ_1() {
-    // 140 cycles delay needed to match with TIMER0 interupt
-    core::arch::asm!(
-        "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
-        "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
-        "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
-        "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
-        "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
-        "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
-        "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
-        "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
-        "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
-        "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
-        "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop", "nop",
-    );
+#[no_mangle]
+pub extern "C" fn core1_timer_irq() {
+    unsafe {
+        let mut read_value: u32;
+        let a = {
+            const SYST_CVR: *const u32 = 0xE000_E018 as *const u32;
+            let ptr_sram4 = 0x20040000 as *mut u32;
+            let start: u32;
+            let end: u32;
+            core::arch::asm!(
+                "ldr {0}, [{3}]", // read systick current value register CVR
+                "ldr {1}, [{4}]", // read from sram4
+                "ldr {2}, [{3}]", // read systick current value register CVR
+                out(reg) start,
+                out(reg) read_value,
+                out(reg) end,
+                in(reg) SYST_CVR,
+                in(reg) ptr_sram4,
+            );
+            start - end - 2
+        };
 
-    let mut read_value: u32;
-    let a = {
-        const SYST_CVR: *const u32 = 0xE000_E018 as *const u32;
-        let ptr_sram4 = 0x20040000 as *mut u32;
-        let start: u32;
-        let end: u32;
-        core::arch::asm!(
-            "ldr {0}, [{3}]", // read systick current value register CVR
-            "ldr {1}, [{4}]", // read from sram4
-            "ldr {2}, [{3}]", // read systick current value register CVR
-            out(reg) start,
-            out(reg) read_value,
-            out(reg) end,
-            in(reg) SYST_CVR,
-            in(reg) ptr_sram4,
+        println!(
+            "concurrent read on core 1 took {} clock cycles. read val is {}",
+            a, read_value
         );
 
-        start - end - 2
-    };
-
-    println!(
-        "concurrent read on core 1 took {} clock cycles. read val is {}",
-        a, read_value
-    );
-    // stop this triggering interrupt
-    unsafe { (0x4005403c as *mut u32).write(0) }; /* TIMER->INTF = 0*/
+        // stop this triggering interrupt
+        pac::Peripherals::steal().TIMER.intf.reset();
+    }
 }
